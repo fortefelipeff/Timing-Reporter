@@ -1,0 +1,13 @@
+    if args.interactive:
+        html_path = generate_report_interactive(df,
+                                               out_html=str((outdir / "index.html")),
+                                               max_lap_sec=args.max_lap_sec,
+                                               max_sector_sec=args.max_sector_sec,
+                                               invert_y=args.invert_y)
+    else:
+        img_paths = plot_all(df, outdir, invert_y=args.invert_y,
+                             max_lap_sec=args.max_lap_sec, max_sector_sec=args.max_sector_sec)
+        html_path = build_html(outdir, img_paths, metrics_show)
+
+    print(f"Relatório gerado em: {html_path}")
+

@@ -1,0 +1,9 @@
+ Tm_sec","median"),
+                      P90=("Lap Tm_sec", lambda x: np.nanpercentile(x.dropna(), 90) if x.notna().any() else np.nan),
+        BestS1=("S1 Tm_sec","min"),
+        BestS2=("S2 Tm_sec","min"),
+        BestS3=("S3 Tm_sec","min"),
+    ).sort_values("Best").reset_index(drop=True)
+    session_best = out["Best"].min()
+    out["DiffFastest"] = out["Best"] - session_best
+    show = out.co

@@ -164,14 +164,13 @@ def _driver_colors(drivers: list[str]) -> dict:
 
 def _contrast_color(hex_color: str) -> str:
     """Retorna '#000' ou '#fff' conforme contraste com a cor de fundo."""
-    try:
-        hex_color = hex_color.lstrip('#')
-        r, g, b = [int(hex_color[i:i+2], 16) for i in (0, 2, 4)]
-        # luminância relativa simples
-        lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-        return '#000' if lum > 0.6 else '#fff'
-    except Exception:
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) != 6:
         return '#000'
+    r, g, b = (int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    # luminância relativa simples
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return '#000' if lum > 0.6 else '#fff'
 
 # ---------- Sumário padronizado ----------
 def build_summary_df(df: pd.DataFrame, order: list[str]) -> pd.DataFrame:

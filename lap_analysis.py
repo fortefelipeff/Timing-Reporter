@@ -22,12 +22,8 @@ import pandas as pd
 import numpy as np
 
 # matplotlib (modo estático)
-"""
-
 # ---------- JS/CSS (ordenar tabela) ----------
 # Usamos string *raw* para não gerar SyntaxWarning com sequências como \d
-
-"""
 SORT_JS = r"""
 <script>
 document.addEventListener('DOMContentLoaded', function () {
@@ -165,6 +161,16 @@ def _driver_colors(drivers: list[str]) -> dict:
     for i, d in enumerate(drivers):
         m[str(d)] = palette[i % len(palette)]
     return m
+
+def _contrast_color(hex_color: str) -> str:
+    """Retorna '#000' ou '#fff' conforme contraste com a cor de fundo."""
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) != 6:
+        return '#000'
+    r, g, b = (int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    # luminância relativa simples
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return '#000' if lum > 0.6 else '#fff'
 
 # ---------- Sumário padronizado ----------
 def build_summary_df(df: pd.DataFrame, order: list[str]) -> pd.DataFrame:
@@ -552,10 +558,20 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
     summary["Best5"] = best5_list
     for c in ["Best","Theo","BestS1","BestS2","BestS3","P50","P90","IQR","Best3","Best5"]:
         summary[c] = summary[c].apply(fmt_mmss)
-    # Usa sumário padronizado
-    table_html = (build_summary_df(df, order)
-                  .to_html(index=False, border=0, classes="summary")
-                  .replace('<table ', '<table id="summary-table" '))
+    # Usa sumário padronizado com cores por piloto
+    final_df = build_summary_df(df, order)
+    header_html = ''.join(f'<th>{col}</th>' for col in final_df.columns)
+    body_rows = []
+    for _, row in final_df.iterrows():
+        bg = color_map.get(str(row['Piloto']), '#fff')
+        fg = _contrast_color(bg)
+        cells = ''.join(f'<td>{row[col]}</td>' for col in final_df.columns)
+        body_rows.append(f'<tr style="background:{bg};color:{fg}">{cells}</tr>')
+    table_html = (
+        '<table id="summary-table" class="summary">'
+        '<thead><tr>' + header_html + '</tr></thead>'
+        '<tbody>' + ''.join(body_rows) + '</tbody></table>'
+    )
 
     # Embed Plotly inline once (first figure) so the HTML works offline.
     # Remaining figures reuse the already-loaded JS to keep file size smaller.
@@ -790,10 +806,14 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
     final_df = build_summary_df(df, order)
     header_vals = list(final_df.columns)
     cell_vals = [final_df[col].astype(str).tolist() for col in final_df.columns]
+    row_colors = [color_map.get(str(p), '#fff') for p in final_df['Piloto']]
+    font_colors = [_contrast_color(c) for c in row_colors]
+    fill_matrix = [row_colors] * len(header_vals)
+    font_matrix = [font_colors] * len(header_vals)
     table_height = 120 + 28 * (len(table_df) + 1)
     fig_table = go.Figure(data=[go.Table(
         header=dict(values=header_vals, fill_color="#6792AB", font=dict(color="white", size=12), align="center"),
-        cells=dict(values=cell_vals, align="center")
+        cells=dict(values=cell_vals, align="center", fill_color=fill_matrix, font=dict(color=font_matrix))
     )])
     fig_table.update_layout(title="Sumário", margin=dict(l=20, r=20, t=40, b=20), height=table_height)
     figs.append(fig_table)

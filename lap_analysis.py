@@ -657,6 +657,7 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
 
     order = (df.groupby("Driver")["Lap Tm_sec"].min().sort_values().index.tolist())
     df["Driver"] = pd.Categorical(df["Driver"], categories=order, ordered=True)
+    color_map = _driver_colors(list(map(str, order)))
 
     def fmt_mmss(x):
         if pd.isna(x): return ""
@@ -675,6 +676,8 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
             fig.add_trace(go.Scatter(
                 x=sub["Lap"], y=sub[ycol], mode="lines+markers", name=str(drv),
                 customdata=custom,
+                line=dict(color=color_map.get(str(drv))),
+                marker=dict(color=color_map.get(str(drv), "#333"), size=6),
                 hovertemplate=("Piloto: %{customdata[0]}<br>Volta: %{x}<br>"
                                "Tempo: %{y:.3f}s (%{customdata[1]})<br>"
                                "Δ sessão: %{customdata[2]:.3f}s<extra></extra>")
@@ -718,7 +721,13 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
         sub = df[df["Driver"] == drv]["Lap Tm_sec"].dropna()
         if sub.empty:
             continue
-        fig_box.add_trace(go.Box(y=sub, name=str(drv), boxpoints="outliers", marker=dict(size=3)))
+        fig_box.add_trace(go.Box(
+            y=sub,
+            name=str(drv),
+            boxpoints="outliers",
+            marker=dict(color=color_map.get(str(drv), "#333"), size=3),
+            line=dict(color=color_map.get(str(drv), "#333"))
+        ))
     fig_box.update_layout(title="Distribuição de Tempos por Piloto",
                           margin=dict(l=70, r=60, t=40, b=120), showlegend=False)
     fig_box.update_yaxes(title="Tempo (s)", showgrid=True, griddash="dot")
@@ -735,7 +744,8 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
             if sub.empty: continue
             sc.add_trace(go.Scatter(
                 x=sub["S1 Tm_sec"], y=sub["S2 Tm_sec"], mode="markers",
-                name=str(drv), marker=dict(size=5, opacity=0.8),
+                name=str(drv),
+                marker=dict(color=color_map.get(str(drv), "#333"), size=5, opacity=0.8),
                 text=[f"Volta {int(l)} — {fmt_mmss(t)}" for l,t in zip(sub["Lap"], sub["Lap Tm_sec"])],
                 hovertemplate="Piloto: %{fullData.name}<br>S1: %{x:.3f}s<br>S2: %{y:.3f}s<br>%{text}<extra></extra>"
             ))

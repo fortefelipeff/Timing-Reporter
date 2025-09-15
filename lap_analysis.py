@@ -168,40 +168,6 @@ def _driver_colors(drivers: list[str]) -> dict:
 
 # ---------- Sumário padronizado ----------
 def build_summary_df(df: pd.DataFrame, order: list[str]) -> pd.DataFrame:
-    base = (df.groupby("Driver")
-              .agg(Voltas=("Lap","nunique"),
-                   Best=("Lap Tm_sec","min"),
-                   BestS1=("S1 Tm_sec","min"),
-                   BestS2=("S2 Tm_sec","min"),
-                   BestS3=("S3 Tm_sec","min"))
-              .reindex(order).reset_index())
-    base["Theo"] = base[["BestS1","BestS2","BestS3"]].sum(axis=1, min_count=1)
-    try:
-        idx_best = df.groupby("Driver")["Lap Tm_sec"].idxmin()
-        best_secs = df.loc[idx_best, ["Driver","S1 Tm_sec","S2 Tm_sec","S3 Tm_sec"]]
-        best_secs = best_secs.rename(columns={"S1 Tm_sec":"LapS1","S2 Tm_sec":"LapS2","S3 Tm_sec":"LapS3"})
-        base = base.merge(best_secs, on="Driver", how="left")
-    except Exception:
-        base["LapS1"] = np.nan; base["LapS2"] = np.nan; base["LapS3"] = np.nan
-    def _best_seq(series: pd.Series, w: int) -> float:
-        s = series.dropna().astype(float)
-        if len(s) < w: return np.nan
-        return s.rolling(window=w).mean().min()
-    b3_list, b5_list = [], []
-    for drv in order:
-        s = df.loc[df["Driver"]==drv, "Lap Tm_sec"].dropna().astype(float)
-        b3_list.append(np.nan if len(s)<3 else _best_seq(s,3))
-        b5_list.append(np.nan if len(s)<5 else _best_seq(s,5))
-    base["Best3"], base["Best5"] = b3_list, b5_list
-    for c in ["Best","Theo","LapS1","BestS1","LapS2","BestS2","LapS3","BestS3","Best3","Best5"]:
-        base[c] = base[c].apply(_fmt_mmss)
-    out = (base.rename(columns={
-        "Driver":"Piloto","Best":"Melhor Volta","Theo":"Volta Teorica",
-        "LapS1":"S1","BestS1":"Melhor S1","LapS2":"S2","BestS2":"Melhor S2","LapS3":"S3","BestS3":"Melhor S3",
-        "Best3":"Melhor 3 Voltas","Best5":"Melhor 5 Voltas"
-    })[["Piloto","Voltas","Melhor Volta","Volta Teorica","S1","Melhor S1","S2","Melhor S2","S3","Melhor S3","Melhor 3 Voltas","Melhor 5 Voltas"]])
-    return out
-def build_summary_df(df: pd.DataFrame, order: list[str]) -> pd.DataFrame:
     """Cria DataFrame de sumário padronizado para HTML e PDF com colunas:
     Piloto, Melhor Volta, Volta Teorica, S1, Melhor S1, S2, Melhor S2, S3, Melhor S3, Melhor 3 Voltas, Melhor 5 Voltas
     """
@@ -255,67 +221,49 @@ def annotate_stints(df: pd.DataFrame, pit_gap_sec: float = 25.0) -> pd.DataFrame
     Marca volta como 'in' se tempo >= mediana_do_piloto + pit_gap_sec; a seguinte vira 'out'.
     """
     if df.empty:
-        df = df.copy()
-        df["Stint"], df["LapType"] = 1, "normal"
-        return df
-    out = df.copy()
-    out["Stint"] = np.nan
+        out = df.copy()
+        out["Stint"], out["LapType"] = 1, "normal"
+        return out
+    out = df.sort_values(["Driver", "Lap"]).copy()
+    medians = out.groupby("Driver")["Lap Tm_sec"].transform("median")
+    gap = (
+        pd.notna(out["Lap Tm_sec"]) & pd.notna(medians) &
+        (out["Lap Tm_sec"] >= medians + float(pit_gap_sec))
+    )
     out["LapType"] = "normal"
-    for drv, sub in out.groupby("Driver", sort=False):
-        sub = sub.sort_values("Lap")
-        idx = sub.index.tolist()
-        med = float(np.nanmedian(sub["Lap Tm_sec"].values)) if sub["Lap Tm_sec"].notna().any() else np.nan
-        stint = 1
-        for i, ix in enumerate(idx):
-            out.at[ix, "Stint"] = stint
-            t = sub.at[ix, "Lap Tm_sec"]
-            if pd.notna(med) and pd.notna(t) and (float(t) >= med + float(pit_gap_sec)):
-                out.at[ix, "LapType"] = "in"
-                if i + 1 < len(idx):
-                    out.at[idx[i+1], "LapType"] = "out"
-                stint += 1
+    out.loc[gap, "LapType"] = "in"
+    out.loc[gap.groupby(out["Driver"]).shift(1, fill_value=False), "LapType"] = "out"
+    stint_cum = gap.groupby(out["Driver"]).cumsum()
+    out["Stint"] = stint_cum + 1
+    out.loc[gap, "Stint"] = stint_cum.loc[gap]
     out["Stint"] = out["Stint"].astype("Int64")
     return out
 
 # ---------- Parsing do CSV ----------
 def parse_lap_data(csv_path: str) -> pd.DataFrame:
     raw = pd.read_csv(csv_path)
-    current_driver = None
-    rows = []
-    for _, r in raw.iterrows():
-        lap_isna = pd.isna(r.get('Lap'))
-        tod = r.get('Time of Day')
-        if lap_isna and isinstance(tod, str) and tod.strip():
-            current_driver = tod.strip()
-            continue
-        if current_driver is not None and not pd.isna(r.get('Lap')):
-            lap_num = r['Lap']
-            lap_tm = r.get('Lap Tm')
-            s1_tm  = r.get('S1 Tm')
-            s2_tm  = r.get('S2 Tm')
-            s3_tm  = r.get('S3 Tm')
-            rows.append({
-                "Driver": current_driver,
-                "Lap": int(lap_num) if not pd.isna(lap_num) else np.nan,
-                "Lap Tm_sec": _to_seconds(lap_tm),
-                "S1 Tm_sec": _to_seconds(s1_tm),
-                "S2 Tm_sec": _to_seconds(s2_tm),
-                "S3 Tm_sec": _to_seconds(s3_tm),
-            })
-    df = pd.DataFrame(rows)
-    df = df.sort_values(["Driver","Lap"]).reset_index(drop=True)
+    raw["Driver"] = raw["Time of Day"].where(raw["Lap"].isna()).ffill()
+    df = raw[raw["Lap"].notna()].copy()
+    df["Lap"] = df["Lap"].astype(int)
+    for col in ["Lap Tm", "S1 Tm", "S2 Tm", "S3 Tm"]:
+        if col in df.columns:
+            df[col + "_sec"] = df[col].map(_to_seconds)
+        else:
+            df[col + "_sec"] = np.nan
+    cols = ["Driver", "Lap", "Lap Tm_sec", "S1 Tm_sec", "S2 Tm_sec", "S3 Tm_sec"]
+    df = df[cols].sort_values(["Driver", "Lap"]).reset_index(drop=True)
     return df
 
 # ---------- Métricas ----------
 def compute_driver_metrics(df: pd.DataFrame):
     g = df.groupby("Driver", as_index=False)
     out = g.agg(
-        Laps=("Lap","nunique"),
-        Best=("Lap Tm_sec","min"),
-                       # P50/P90 removidos do PDF
-        BestS1=("S1 Tm_sec","min"),
-        BestS2=("S2 Tm_sec","min"),
-        BestS3=("S3 Tm_sec","min"),
+        Laps=("Lap", "nunique"),
+        Best=("Lap Tm_sec", "min"),
+        Avg=("Lap Tm_sec", "mean"),
+        BestS1=("S1 Tm_sec", "min"),
+        BestS2=("S2 Tm_sec", "min"),
+        BestS3=("S3 Tm_sec", "min"),
     ).sort_values("Best").reset_index(drop=True)
     session_best = out["Best"].min()
     out["DiffFastest"] = out["Best"] - session_best
@@ -469,8 +417,6 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
             fig.add_trace(go.Scatter(
                 x=sub["Lap"], y=sub[ycol], mode="lines+markers", name=str(drv),
                 customdata=custom,
-                line=dict(color=color_map.get(str(drv))),
-                marker=dict(color=color_map.get(str(drv), "#333"), size=6),
                 line=dict(color=color_map.get(str(drv))),
                 marker=dict(color=color_map.get(str(drv), "#333"), size=6),
                 hovertemplate=("Piloto: %{customdata[0]}<br>Volta: %{x}<br>"

@@ -946,4 +946,4 @@ def main():
         print(f"Relatório PDF gerado em: {pdf_path}")
 
 if __name__ == "__main__":
-    main()
+    main()  # teste

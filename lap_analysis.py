@@ -22,12 +22,8 @@ import pandas as pd
 import numpy as np
 
 # matplotlib (modo estático)
-"""
-
 # ---------- JS/CSS (ordenar tabela) ----------
 # Usamos string *raw* para não gerar SyntaxWarning com sequências como \d
-
-"""
 SORT_JS = r"""
 <script>
 document.addEventListener('DOMContentLoaded', function () {
@@ -166,41 +162,17 @@ def _driver_colors(drivers: list[str]) -> dict:
         m[str(d)] = palette[i % len(palette)]
     return m
 
+def _contrast_color(hex_color: str) -> str:
+    """Retorna '#000' ou '#fff' conforme contraste com a cor de fundo."""
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) != 6:
+        return '#000'
+    r, g, b = (int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    # luminância relativa simples
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return '#000' if lum > 0.6 else '#fff'
+
 # ---------- Sumário padronizado ----------
-def build_summary_df(df: pd.DataFrame, order: list[str]) -> pd.DataFrame:
-    base = (df.groupby("Driver")
-              .agg(Voltas=("Lap","nunique"),
-                   Best=("Lap Tm_sec","min"),
-                   BestS1=("S1 Tm_sec","min"),
-                   BestS2=("S2 Tm_sec","min"),
-                   BestS3=("S3 Tm_sec","min"))
-              .reindex(order).reset_index())
-    base["Theo"] = base[["BestS1","BestS2","BestS3"]].sum(axis=1, min_count=1)
-    try:
-        idx_best = df.groupby("Driver")["Lap Tm_sec"].idxmin()
-        best_secs = df.loc[idx_best, ["Driver","S1 Tm_sec","S2 Tm_sec","S3 Tm_sec"]]
-        best_secs = best_secs.rename(columns={"S1 Tm_sec":"LapS1","S2 Tm_sec":"LapS2","S3 Tm_sec":"LapS3"})
-        base = base.merge(best_secs, on="Driver", how="left")
-    except Exception:
-        base["LapS1"] = np.nan; base["LapS2"] = np.nan; base["LapS3"] = np.nan
-    def _best_seq(series: pd.Series, w: int) -> float:
-        s = series.dropna().astype(float)
-        if len(s) < w: return np.nan
-        return s.rolling(window=w).mean().min()
-    b3_list, b5_list = [], []
-    for drv in order:
-        s = df.loc[df["Driver"]==drv, "Lap Tm_sec"].dropna().astype(float)
-        b3_list.append(np.nan if len(s)<3 else _best_seq(s,3))
-        b5_list.append(np.nan if len(s)<5 else _best_seq(s,5))
-    base["Best3"], base["Best5"] = b3_list, b5_list
-    for c in ["Best","Theo","LapS1","BestS1","LapS2","BestS2","LapS3","BestS3","Best3","Best5"]:
-        base[c] = base[c].apply(_fmt_mmss)
-    out = (base.rename(columns={
-        "Driver":"Piloto","Best":"Melhor Volta","Theo":"Volta Teorica",
-        "LapS1":"S1","BestS1":"Melhor S1","LapS2":"S2","BestS2":"Melhor S2","LapS3":"S3","BestS3":"Melhor S3",
-        "Best3":"Melhor 3 Voltas","Best5":"Melhor 5 Voltas"
-    })[["Piloto","Voltas","Melhor Volta","Volta Teorica","S1","Melhor S1","S2","Melhor S2","S3","Melhor S3","Melhor 3 Voltas","Melhor 5 Voltas"]])
-    return out
 def build_summary_df(df: pd.DataFrame, order: list[str]) -> pd.DataFrame:
     """Cria DataFrame de sumário padronizado para HTML e PDF com colunas:
     Piloto, Melhor Volta, Volta Teorica, S1, Melhor S1, S2, Melhor S2, S3, Melhor S3, Melhor 3 Voltas, Melhor 5 Voltas
@@ -255,67 +227,49 @@ def annotate_stints(df: pd.DataFrame, pit_gap_sec: float = 25.0) -> pd.DataFrame
     Marca volta como 'in' se tempo >= mediana_do_piloto + pit_gap_sec; a seguinte vira 'out'.
     """
     if df.empty:
-        df = df.copy()
-        df["Stint"], df["LapType"] = 1, "normal"
-        return df
-    out = df.copy()
-    out["Stint"] = np.nan
+        out = df.copy()
+        out["Stint"], out["LapType"] = 1, "normal"
+        return out
+    out = df.sort_values(["Driver", "Lap"]).copy()
+    medians = out.groupby("Driver")["Lap Tm_sec"].transform("median")
+    gap = (
+        pd.notna(out["Lap Tm_sec"]) & pd.notna(medians) &
+        (out["Lap Tm_sec"] >= medians + float(pit_gap_sec))
+    )
     out["LapType"] = "normal"
-    for drv, sub in out.groupby("Driver", sort=False):
-        sub = sub.sort_values("Lap")
-        idx = sub.index.tolist()
-        med = float(np.nanmedian(sub["Lap Tm_sec"].values)) if sub["Lap Tm_sec"].notna().any() else np.nan
-        stint = 1
-        for i, ix in enumerate(idx):
-            out.at[ix, "Stint"] = stint
-            t = sub.at[ix, "Lap Tm_sec"]
-            if pd.notna(med) and pd.notna(t) and (float(t) >= med + float(pit_gap_sec)):
-                out.at[ix, "LapType"] = "in"
-                if i + 1 < len(idx):
-                    out.at[idx[i+1], "LapType"] = "out"
-                stint += 1
+    out.loc[gap, "LapType"] = "in"
+    out.loc[gap.groupby(out["Driver"]).shift(1, fill_value=False), "LapType"] = "out"
+    stint_cum = gap.groupby(out["Driver"]).cumsum()
+    out["Stint"] = stint_cum + 1
+    out.loc[gap, "Stint"] = stint_cum.loc[gap]
     out["Stint"] = out["Stint"].astype("Int64")
     return out
 
 # ---------- Parsing do CSV ----------
 def parse_lap_data(csv_path: str) -> pd.DataFrame:
     raw = pd.read_csv(csv_path)
-    current_driver = None
-    rows = []
-    for _, r in raw.iterrows():
-        lap_isna = pd.isna(r.get('Lap'))
-        tod = r.get('Time of Day')
-        if lap_isna and isinstance(tod, str) and tod.strip():
-            current_driver = tod.strip()
-            continue
-        if current_driver is not None and not pd.isna(r.get('Lap')):
-            lap_num = r['Lap']
-            lap_tm = r.get('Lap Tm')
-            s1_tm  = r.get('S1 Tm')
-            s2_tm  = r.get('S2 Tm')
-            s3_tm  = r.get('S3 Tm')
-            rows.append({
-                "Driver": current_driver,
-                "Lap": int(lap_num) if not pd.isna(lap_num) else np.nan,
-                "Lap Tm_sec": _to_seconds(lap_tm),
-                "S1 Tm_sec": _to_seconds(s1_tm),
-                "S2 Tm_sec": _to_seconds(s2_tm),
-                "S3 Tm_sec": _to_seconds(s3_tm),
-            })
-    df = pd.DataFrame(rows)
-    df = df.sort_values(["Driver","Lap"]).reset_index(drop=True)
+    raw["Driver"] = raw["Time of Day"].where(raw["Lap"].isna()).ffill()
+    df = raw[raw["Lap"].notna()].copy()
+    df["Lap"] = df["Lap"].astype(int)
+    for col in ["Lap Tm", "S1 Tm", "S2 Tm", "S3 Tm"]:
+        if col in df.columns:
+            df[col + "_sec"] = df[col].map(_to_seconds)
+        else:
+            df[col + "_sec"] = np.nan
+    cols = ["Driver", "Lap", "Lap Tm_sec", "S1 Tm_sec", "S2 Tm_sec", "S3 Tm_sec"]
+    df = df[cols].sort_values(["Driver", "Lap"]).reset_index(drop=True)
     return df
 
 # ---------- Métricas ----------
 def compute_driver_metrics(df: pd.DataFrame):
     g = df.groupby("Driver", as_index=False)
     out = g.agg(
-        Laps=("Lap","nunique"),
-        Best=("Lap Tm_sec","min"),
-                       # P50/P90 removidos do PDF
-        BestS1=("S1 Tm_sec","min"),
-        BestS2=("S2 Tm_sec","min"),
-        BestS3=("S3 Tm_sec","min"),
+        Laps=("Lap", "nunique"),
+        Best=("Lap Tm_sec", "min"),
+        Avg=("Lap Tm_sec", "mean"),
+        BestS1=("S1 Tm_sec", "min"),
+        BestS2=("S2 Tm_sec", "min"),
+        BestS3=("S3 Tm_sec", "min"),
     ).sort_values("Best").reset_index(drop=True)
     session_best = out["Best"].min()
     out["DiffFastest"] = out["Best"] - session_best
@@ -471,8 +425,6 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
                 customdata=custom,
                 line=dict(color=color_map.get(str(drv))),
                 marker=dict(color=color_map.get(str(drv), "#333"), size=6),
-                line=dict(color=color_map.get(str(drv))),
-                marker=dict(color=color_map.get(str(drv), "#333"), size=6),
                 hovertemplate=("Piloto: %{customdata[0]}<br>Volta: %{x}<br>"
                                "Tempo: %{y:.3f}s (%{customdata[1]})<br>"
                                "Δ sessão: %{customdata[2]:.3f}s<extra></extra>")
@@ -491,28 +443,15 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
         fig.update_layout(title=title)
         return fig
 
-    fig_lap = make_line_figure("Lap Tm_sec", "Tempo de Volta – Todos os Pilotos")
-    figs = [fig_lap]
-    for col, title in [("S1 Tm_sec","Setor 1"), ("S2 Tm_sec","Setor 2"), ("S3 Tm_sec","Setor 3")]:
-        if col in df.columns: figs.append(make_line_figure(col, title))
+    fig_sections: list[tuple[str, go.Figure]] = []
+    fig_sections.append(("Tempo de Volta – Todos os Pilotos",
+                         make_line_figure("Lap Tm_sec", "Tempo de Volta – Todos os Pilotos")))
+    for col, title in [("S1 Tm_sec", "Setor 1"),
+                       ("S2 Tm_sec", "Setor 2"),
+                       ("S3 Tm_sec", "Setor 3")]:
+        if col in df.columns:
+            fig_sections.append((title, make_line_figure(col, title)))
 
-    best = (df.groupby("Driver", as_index=False)["Lap Tm_sec"].min().sort_values("Lap Tm_sec"))
-    best["mmss"] = best["Lap Tm_sec"].apply(fmt_mmss)
-    delta = best["Lap Tm_sec"] - best["Lap Tm_sec"].min()
-    fig_ladder = go.Figure(go.Bar(
-        x=best["Lap Tm_sec"], y=best["Driver"], orientation="h",
-        customdata=np.stack([best["Driver"].astype(str).values,
-                             best["mmss"].astype(str).values, delta.values], axis=-1),
-        hovertemplate=("Piloto: %{customdata[0]}<br>"
-                       "Melhor Volta: %{x:.3f}s (%{customdata[1]})<br>"
-                       "Δ sessão: %{customdata[2]:.3f}s<extra></extra>"),
-        name=""
-    ))
-    fig_ladder.update_layout(title="Melhor Volta por Piloto",
-                             margin=dict(l=200, r=60, t=60, b=40))
-    fig_ladder.update_xaxes(title="Tempo (s)", showgrid=True, griddash="dot")
-    # Substitui o gráfico de barras por boxplot por piloto
-    figs.pop()
     fig_box = go.Figure()
     for drv in order:
         sub = df[df["Driver"] == drv]["Lap Tm_sec"].dropna()
@@ -527,23 +466,24 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
     if invert_y:
         fig_box.update_yaxes(autorange="reversed")
     fig_box.update_xaxes(tickangle=-45)
-    figs.append(fig_box)
+    fig_sections.append(("Distribuição de Tempos por Piloto", fig_box))
 
-    # Scatter S1 × S2
-    if set(["S1 Tm_sec","S2 Tm_sec"]).issubset(df.columns):
+    scatter_fig: go.Figure | None = None
+    if set(["S1 Tm_sec", "S2 Tm_sec"]).issubset(df.columns):
         sc = go.Figure()
         for drv in order:
-            sub = df[df["Driver"] == drv][["S1 Tm_sec","S2 Tm_sec","Lap","Lap Tm_sec"]].dropna()
-            if sub.empty: continue
+            sub = df[df["Driver"] == drv][["S1 Tm_sec", "S2 Tm_sec", "Lap", "Lap Tm_sec"]].dropna()
+            if sub.empty:
+                continue
             sc.add_trace(go.Scatter(
                 x=sub["S1 Tm_sec"], y=sub["S2 Tm_sec"], mode="markers",
                 name=str(drv), marker=dict(size=5, opacity=0.8, color=color_map.get(str(drv))),
-                text=[f"Volta {int(l)} — {fmt_mmss(t)}" for l,t in zip(sub["Lap"], sub["Lap Tm_sec"])],
+                text=[f"Volta {int(l)} — {fmt_mmss(t)}" for l, t in zip(sub["Lap"], sub["Lap Tm_sec"])],
                 hovertemplate="Piloto: %{fullData.name}<br>S1: %{x:.3f}s<br>S2: %{y:.3f}s<br>%{text}<extra></extra>"
             ))
         sc.update_layout(title="Dispersão S1 × S2", xaxis_title="S1 (s)", yaxis_title="S2 (s)",
                          margin=dict(l=70, r=60, t=40, b=60))
-        figs.append(sc)
+        scatter_fig = sc
 
     # Heatmap de Δ p/ melhor sessão por volta
     session_best = df["Lap Tm_sec"].min()
@@ -562,11 +502,9 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
     ))
     hm.update_layout(title="Heatmap Δ p/ Melhor Sessão", xaxis_title="Volta", yaxis_title="Piloto",
                      margin=dict(l=120, r=60, t=40, b=60))
-    # Garante exibição no HTML (template mostra parts[4])
-    try:
-        figs.insert(4, hm)
-    except Exception:
-        figs.append(hm)
+    fig_sections.append(("Heatmap Δ p/ Melhor Sessão", hm))
+    if scatter_fig is not None:
+        fig_sections.append(("Dispersão S1 × S2", scatter_fig))
 
     summary = (df.groupby("Driver")
                  .agg(Voltas=("Lap","nunique"),
@@ -606,19 +544,28 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
     summary["Best5"] = best5_list
     for c in ["Best","Theo","BestS1","BestS2","BestS3","P50","P90","IQR","Best3","Best5"]:
         summary[c] = summary[c].apply(fmt_mmss)
-    # Usa sumário padronizado
-    table_html = (build_summary_df(df, order)
-                  .to_html(index=False, border=0, classes="summary")
-                  .replace('<table ', '<table id="summary-table" '))
+    # Usa sumário padronizado com cores por piloto
+    final_df = build_summary_df(df, order)
+    header_html = ''.join(f'<th>{col}</th>' for col in final_df.columns)
+    body_rows = []
+    for _, row in final_df.iterrows():
+        bg = color_map.get(str(row['Piloto']), '#fff')
+        fg = _contrast_color(bg)
+        cells = ''.join(f'<td>{row[col]}</td>' for col in final_df.columns)
+        body_rows.append(f'<tr style="background:{bg};color:{fg}">{cells}</tr>')
+    table_html = (
+        '<table id="summary-table" class="summary">'
+        '<thead><tr>' + header_html + '</tr></thead>'
+        '<tbody>' + ''.join(body_rows) + '</tbody></table>'
+    )
 
-    # Embed Plotly inline once (first figure) so the HTML works offline.
-    # Remaining figures reuse the already-loaded JS to keep file size smaller.
-    if len(figs) > 0:
-        parts = [pio.to_html(figs[0], include_plotlyjs="inline", full_html=False)]
-        if len(figs) > 1:
-            parts += [pio.to_html(f, include_plotlyjs=False, full_html=False) for f in figs[1:]]
-    else:
-        parts = []
+    chart_blocks: list[str] = []
+    for idx, (title, figure) in enumerate(fig_sections):
+        include_js = "inline" if idx == 0 else False
+        snippet = pio.to_html(figure, include_plotlyjs=include_js, full_html=False)
+        chart_blocks.append(f"    <div class=\"box\"><h2>{title}</h2>{snippet}</div>")
+
+    charts_html = "\n".join(chart_blocks)
     html = f"""
 <!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
 <title>Timing Report (Interativo)</title>
@@ -632,11 +579,7 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
  .summary tr:nth-child(even){{ background:#f6f6f6; }}
 </style></head><body>
   <div class="container">
-    <div class="box"><h2>Tempo de Volta – Todos os Pilotos</h2>{parts[0]}</div>
-    <div class="box"><h2>Setor 1</h2>{parts[1] if len(parts)>1 else ""}</div>
-    <div class="box"><h2>Setor 2</h2>{parts[2] if len(parts)>2 else ""}</div>
-    <div class="box"><h2>Setor 3</h2>{parts[3] if len(parts)>3 else ""}</div>
-    <div class="box"><h2>Melhor Volta por Piloto</h2>{parts[4] if len(parts)>4 else ""}</div>
+{charts_html}
     <div class="box"><h2>Sumário</h2>{table_html}<div><small>Clique nos cabeçalhos para ordenar ↑↓</small></div></div>
   </div>
 </body></html>
@@ -711,6 +654,7 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
 
     order = (df.groupby("Driver")["Lap Tm_sec"].min().sort_values().index.tolist())
     df["Driver"] = pd.Categorical(df["Driver"], categories=order, ordered=True)
+    color_map = _driver_colors(list(map(str, order)))
 
     def fmt_mmss(x):
         if pd.isna(x): return ""
@@ -729,6 +673,8 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
             fig.add_trace(go.Scatter(
                 x=sub["Lap"], y=sub[ycol], mode="lines+markers", name=str(drv),
                 customdata=custom,
+                line=dict(color=color_map.get(str(drv))),
+                marker=dict(color=color_map.get(str(drv), "#333"), size=6),
                 hovertemplate=("Piloto: %{customdata[0]}<br>Volta: %{x}<br>"
                                "Tempo: %{y:.3f}s (%{customdata[1]})<br>"
                                "Δ sessão: %{customdata[2]:.3f}s<extra></extra>")
@@ -744,58 +690,52 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
         fig.update_layout(title=title)
         return fig
 
-    figs = [
-        make_line_figure("Lap Tm_sec", "Tempo de Volta – Todos os Pilotos")
-    ]
-    for col, title in [("S1 Tm_sec","Setor 1"), ("S2 Tm_sec","Setor 2"), ("S3 Tm_sec","Setor 3")]:
-        if col in df.columns: figs.append(make_line_figure(col, title))
+    fig_sections: list[tuple[str, go.Figure]] = []
+    fig_sections.append(("Tempo de Volta – Todos os Pilotos",
+                         make_line_figure("Lap Tm_sec", "Tempo de Volta – Todos os Pilotos")))
+    for col, title in [("S1 Tm_sec", "Setor 1"),
+                       ("S2 Tm_sec", "Setor 2"),
+                       ("S3 Tm_sec", "Setor 3")]:
+        if col in df.columns:
+            fig_sections.append((title, make_line_figure(col, title)))
 
-    best = (df.groupby("Driver", as_index=False)["Lap Tm_sec"].min().sort_values("Lap Tm_sec"))
-    best["mmss"] = best["Lap Tm_sec"].apply(fmt_mmss)
-    delta = best["Lap Tm_sec"] - best["Lap Tm_sec"].min()
-    fig_ladder = go.Figure(go.Bar(
-        x=best["Lap Tm_sec"], y=best["Driver"], orientation="h",
-        customdata=np.stack([best["Driver"].astype(str).values,
-                             best["mmss"].astype(str).values, delta.values], axis=-1),
-        hovertemplate=("Piloto: %{customdata[0]}<br>"
-                       "Melhor Volta: %{x:.3f}s (%{customdata[1]})<br>"
-                       "Δ sessão: %{customdata[2]:.3f}s<extra></extra>"),
-        name=""
-    ))
-    fig_ladder.update_layout(title="Melhor Volta por Piloto",
-                             margin=dict(l=200, r=60, t=60, b=40))
-    fig_ladder.update_xaxes(title="Tempo (s)", showgrid=True, griddash="dot")
-    # Substitui o gráfico de barras por boxplot por piloto
-    figs.pop()
     fig_box = go.Figure()
     for drv in order:
         sub = df[df["Driver"] == drv]["Lap Tm_sec"].dropna()
         if sub.empty:
             continue
-        fig_box.add_trace(go.Box(y=sub, name=str(drv), boxpoints="outliers", marker=dict(size=3)))
+        fig_box.add_trace(go.Box(
+            y=sub,
+            name=str(drv),
+            boxpoints="outliers",
+            marker=dict(color=color_map.get(str(drv), "#333"), size=3),
+            line=dict(color=color_map.get(str(drv), "#333"))
+        ))
     fig_box.update_layout(title="Distribuição de Tempos por Piloto",
                           margin=dict(l=70, r=60, t=40, b=120), showlegend=False)
     fig_box.update_yaxes(title="Tempo (s)", showgrid=True, griddash="dot")
     if invert_y:
         fig_box.update_yaxes(autorange="reversed")
     fig_box.update_xaxes(tickangle=-45)
-    figs.append(fig_box)
+    fig_sections.append(("Distribuição de Tempos por Piloto", fig_box))
 
-    # Scatter S1 × S2
-    if set(["S1 Tm_sec","S2 Tm_sec"]).issubset(df.columns):
+    scatter_fig: go.Figure | None = None
+    if set(["S1 Tm_sec", "S2 Tm_sec"]).issubset(df.columns):
         sc = go.Figure()
         for drv in order:
-            sub = df[df["Driver"] == drv][["S1 Tm_sec","S2 Tm_sec","Lap","Lap Tm_sec"]].dropna()
-            if sub.empty: continue
+            sub = df[df["Driver"] == drv][["S1 Tm_sec", "S2 Tm_sec", "Lap", "Lap Tm_sec"]].dropna()
+            if sub.empty:
+                continue
             sc.add_trace(go.Scatter(
                 x=sub["S1 Tm_sec"], y=sub["S2 Tm_sec"], mode="markers",
-                name=str(drv), marker=dict(size=5, opacity=0.8),
-                text=[f"Volta {int(l)} — {fmt_mmss(t)}" for l,t in zip(sub["Lap"], sub["Lap Tm_sec"])],
+                name=str(drv),
+                marker=dict(color=color_map.get(str(drv), "#333"), size=5, opacity=0.8),
+                text=[f"Volta {int(l)} — {fmt_mmss(t)}" for l, t in zip(sub["Lap"], sub["Lap Tm_sec"])],
                 hovertemplate="Piloto: %{fullData.name}<br>S1: %{x:.3f}s<br>S2: %{y:.3f}s<br>%{text}<extra></extra>"
             ))
         sc.update_layout(title="Dispersão S1 × S2", xaxis_title="S1 (s)", yaxis_title="S2 (s)",
                          margin=dict(l=70, r=60, t=40, b=60))
-        figs.append(sc)
+        scatter_fig = sc
 
     # Heatmap Δ p/ melhor sessão por volta
     session_best = df["Lap Tm_sec"].min()
@@ -812,7 +752,9 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
                                    colorbar=dict(title="Δ sess (s)")))
     hm.update_layout(title="Heatmap Δ p/ Melhor Sessão", xaxis_title="Volta", yaxis_title="Piloto",
                      margin=dict(l=120, r=60, t=40, b=60))
-    figs.append(hm)
+    fig_sections.append(("Heatmap Δ p/ Melhor Sessão", hm))
+    if scatter_fig is not None:
+        fig_sections.append(("Dispersão S1 × S2", scatter_fig))
 
     # Tabela de resumo (como figura Plotly Table) com métricas de consistência
     summary = (df.groupby("Driver")
@@ -834,16 +776,20 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
     final_df = build_summary_df(df, order)
     header_vals = list(final_df.columns)
     cell_vals = [final_df[col].astype(str).tolist() for col in final_df.columns]
+    row_colors = [color_map.get(str(p), '#fff') for p in final_df['Piloto']]
+    font_colors = [_contrast_color(c) for c in row_colors]
+    fill_matrix = [row_colors] * len(header_vals)
+    font_matrix = [font_colors] * len(header_vals)
     table_height = 120 + 28 * (len(table_df) + 1)
     fig_table = go.Figure(data=[go.Table(
         header=dict(values=header_vals, fill_color="#6792AB", font=dict(color="white", size=12), align="center"),
-        cells=dict(values=cell_vals, align="center")
+        cells=dict(values=cell_vals, align="center", fill_color=fill_matrix, font=dict(color=font_matrix))
     )])
     fig_table.update_layout(title="Sumário", margin=dict(l=20, r=20, t=40, b=20), height=table_height)
-    figs.append(fig_table)
+    fig_sections.append(("Sumário", fig_table))
 
     images = []
-    for fig in figs:
+    for _, fig in fig_sections:
         try:
             png_bytes = pio.to_image(fig, format="png", width=1600, height=900, scale=2)
         except Exception as e:
@@ -1000,4 +946,4 @@ def main():
         print(f"Relatório PDF gerado em: {pdf_path}")
 
 if __name__ == "__main__":
-    main()
+    main()  # teste

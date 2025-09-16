@@ -18,8 +18,9 @@ Dependências:
 
 import argparse
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 # matplotlib (modo estático)
 # ---------- JS/CSS (ordenar tabela) ----------
@@ -296,6 +297,11 @@ def _palette_for(drivers):
 
 def plot_all(df: pd.DataFrame, outdir: Path, invert_y=False,
              max_lap_sec=200.0, max_sector_sec=100.0) -> dict:
+    global plt
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError("Matplotlib não está instalado. Rode: pip install matplotlib") from exc
     outdir.mkdir(parents=True, exist_ok=True)
     dff = df[df["Lap Tm_sec"].notna() & (df["Lap Tm_sec"] < max_lap_sec)].copy()
     for col in ["S1 Tm_sec","S2 Tm_sec","S3 Tm_sec"]:
@@ -559,6 +565,7 @@ def generate_report_interactive(lap_df: pd.DataFrame, out_html: str = "report.ht
         '<tbody>' + ''.join(body_rows) + '</tbody></table>'
     )
 
+    # Embed Plotly bundle once so o HTML funciona offline e reaproveita o JS nas figuras seguintes
     chart_blocks: list[str] = []
     for idx, (title, figure) in enumerate(fig_sections):
         include_js = "inline" if idx == 0 else False
@@ -769,18 +776,14 @@ def export_report_pdf(lap_df: pd.DataFrame, out_pdf: str = "report.pdf",
     summary["Theo"] = summary[["BestS1","BestS2","BestS3"]].sum(axis=1, min_count=1)
     for c in ["Best","Theo","BestS1","BestS2","BestS3"]:
         summary[c] = summary[c].apply(fmt_mmss)
-    table_df = summary.rename(columns={
-        "Driver":"Piloto","Voltas":"Voltas","Best":"Melhor Volta","Avg":"Volta Média",
-        "BestS1":"Melhor S1","BestS2":"Melhor S2","BestS3":"Melhor S3"
-    })
     final_df = build_summary_df(df, order)
     header_vals = list(final_df.columns)
     cell_vals = [final_df[col].astype(str).tolist() for col in final_df.columns]
     row_colors = [color_map.get(str(p), '#fff') for p in final_df['Piloto']]
     font_colors = [_contrast_color(c) for c in row_colors]
-    fill_matrix = [row_colors] * len(header_vals)
-    font_matrix = [font_colors] * len(header_vals)
-    table_height = 120 + 28 * (len(table_df) + 1)
+    fill_matrix = [row_colors[:] for _ in header_vals]
+    font_matrix = [font_colors[:] for _ in header_vals]
+    table_height = 120 + 28 * (len(final_df) + 1)
     fig_table = go.Figure(data=[go.Table(
         header=dict(values=header_vals, fill_color="#6792AB", font=dict(color="white", size=12), align="center"),
         cells=dict(values=cell_vals, align="center", fill_color=fill_matrix, font=dict(color=font_matrix))
@@ -909,7 +912,7 @@ def main():
 
     # Pergunta onde salvar o HTML
     html_target = _pick_save_path(
-        title="Salvar relat��rio HTML",
+        title="Salvar relatório HTML",
         initial_dir=str(outdir),
         default_name="index.html",
         defaultextension=".html",
@@ -928,7 +931,7 @@ def main():
     print(f"Relatório gerado em: {html_path}")
     if args.pdf:
         pdf_target = _pick_save_path(
-            title="Salvar relat��rio PDF",
+            title="Salvar relatório PDF",
             initial_dir=str(Path(html_target).parent),
             default_name="index.pdf",
             defaultextension=".pdf",
@@ -946,4 +949,4 @@ def main():
         print(f"Relatório PDF gerado em: {pdf_path}")
 
 if __name__ == "__main__":
-    main()  # teste
+    main()
